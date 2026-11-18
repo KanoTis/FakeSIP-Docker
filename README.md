@@ -6,7 +6,7 @@ Disguise your UDP traffic as SIP protocol to evade DPI detection, using Netfilte
 
 The image is built `FROM scratch`. It ships the `fakesip` binary, a statically
 linked `nft`, and `iptables`/`ip6tables` (nft + legacy variants, musl, with the
-xtables extensions FakeSIP needs). Total size: ~2.5 MB.
+xtables extensions FakeSIP needs). Total size: ~2.6 MB.
 
 
 ## Quick Start
@@ -44,8 +44,11 @@ Notes:
 - The container ships a static `nft`; the host kernel must provide
   `nf_tables` and `nfnetlink_queue` support.
 - `-z` (use `iptables` instead of `nft`) works too: `iptables`/`ip6tables` are
-  the nft-backed xtables binaries, and `iptables-legacy`/`ip6tables-legacy` are
-  included for kernels without `nf_tables`.
+  a small shim that tries the nft-backed xtables binary and transparently falls
+  back to `iptables-legacy`/`ip6tables-legacy` when `nf_tables` is missing or
+  broken (older kernels such as Synology DSM 4.4). The chosen backend is cached
+  in `/run/xtables.backend` for the container lifetime, so a single run never
+  mixes both.
 - `CAP_SYS_NICE` is optional, it only silences the `setpriority()` warning.
 
 

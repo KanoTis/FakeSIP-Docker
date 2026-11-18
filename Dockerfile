@@ -77,15 +77,24 @@ RUN set -eux; \
 ###############################################################################
 # 3. iptables (musl, nft and legacy variants + the extensions FakeSIP uses)
 ###############################################################################
-FROM ${ALPINE} AS iptables
+FROM toolchain AS iptables
 
 RUN apk add --no-cache iptables iptables-legacy
+
+COPY xtables-dispatch.c /src/xtables-dispatch.c
+
+RUN set -eux; \
+    gcc -static -Os -s -fno-pie -no-pie \
+        -o /xtables-dispatch /src/xtables-dispatch.c; \
+    ls -l /xtables-dispatch
 
 RUN set -eux; \
     root=/rootfs; \
     mkdir -p "$root/usr/sbin" "$root/usr/lib/xtables" "$root/lib" "$root/run"; \
     cp -a /usr/sbin/xtables-nft-multi /usr/sbin/xtables-legacy-multi "$root/usr/sbin/"; \
-    for name in iptables ip6tables iptables-save iptables-restore \
+    cp -a /xtables-dispatch "$root/usr/sbin/iptables"; \
+    cp -a /xtables-dispatch "$root/usr/sbin/ip6tables"; \
+    for name in iptables-save iptables-restore \
                 ip6tables-save ip6tables-restore iptables-nft ip6tables-nft \
                 xtables-monitor; do \
         ln -s xtables-nft-multi "$root/usr/sbin/$name"; \
