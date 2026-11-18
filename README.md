@@ -20,6 +20,29 @@ docker run --rm \
 ```
 
 
+## Kernel modules
+
+FakeSIP needs `xt_connbytes`, `xt_NFQUEUE` and `nfnetlink_queue` in the host
+kernel. Many systems (Synology DSM, OpenWrt, ...) ship them as modules that are
+not autoloaded. Mount the host module tree and grant `CAP_SYS_MODULE` to have
+the container load them itself:
+
+```sh
+docker run --rm     --net=host     --cap-add NET_ADMIN     --cap-add NET_RAW     --cap-add SYS_MODULE     -v /lib/modules:/lib/modules:ro     ghcr.io/kanotis/fakesip-docker -i eth0 -z
+```
+
+If `xt_connbytes` is missing from the kernel altogether, the `-m connbytes`
+rule is degraded to `-m conntrack --ctstate NEW` (first packet of each flow
+instead of the first five) and this is logged:
+
+```
+fakesip-docker: kernel has no connbytes match, degrading to "-m conntrack --ctstate NEW" (first packet of each flow only)
+```
+
+Set `FAKESIP_NO_MODPROBE=1` to disable module loading, or
+`FAKESIP_NO_CONNBYTES=1` to force the degraded rule.
+
+
 ## Usage
 
 All arguments are passed straight to `fakesip`, e.g.:

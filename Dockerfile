@@ -94,6 +94,7 @@ RUN set -eux; \
     cp -a /usr/sbin/xtables-nft-multi /usr/sbin/xtables-legacy-multi "$root/usr/sbin/"; \
     cp -a /xtables-dispatch "$root/usr/sbin/iptables"; \
     cp -a /xtables-dispatch "$root/usr/sbin/ip6tables"; \
+    cp -a /xtables-dispatch "$root/usr/sbin/nft"; \
     for name in iptables-save iptables-restore ip6tables-save ip6tables-restore \
                 iptables-nft ip6tables-nft xtables-monitor; do \
         ln -s xtables-nft-multi "$root/usr/sbin/$name"; \
@@ -148,7 +149,7 @@ RUN set -eux; \
 ###############################################################################
 FROM scratch
 
-COPY --from=nft /usr/sbin/nft /usr/sbin/nft
+COPY --from=nft /usr/sbin/nft /usr/sbin/nft.real
 COPY --from=iptables /rootfs/ /
 COPY --from=fakesip /fakesip /usr/sbin/fakesip
 
