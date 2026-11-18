@@ -11,6 +11,7 @@ RUN apk add --no-cache \
         bash \
         bzip2 \
         curl \
+        file \
         gcc \
         linux-headers \
         make \
@@ -70,8 +71,8 @@ RUN set -eux; \
     make install; \
     strip /usr/sbin/nft; \
     ls -l /usr/sbin/nft; \
-    ldd /usr/sbin/nft || true; \
-    /usr/sbin/nft --version
+    readelf -h /usr/sbin/nft | grep 'Machine:'; \
+    ldd /usr/sbin/nft || true
 
 ###############################################################################
 # 3. fakesip release binary
