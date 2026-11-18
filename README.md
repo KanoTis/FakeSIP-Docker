@@ -46,9 +46,10 @@ Notes:
 - `-z` (use `iptables` instead of `nft`) works too: `iptables`/`ip6tables` are
   a small shim that tries the nft-backed xtables binary and transparently falls
   back to `iptables-legacy`/`ip6tables-legacy` when `nf_tables` is missing or
-  broken (older kernels such as Synology DSM 4.4). The chosen backend is cached
-  in `/run/xtables.backend` for the container lifetime, so a single run never
-  mixes both.
+  broken (the same legacy backend FakeHTTP-Docker uses). The choice is cached
+  per address family in `/run/xtables.iptables` and `/run/xtables.ip6tables`,
+  so one family never mixes backends. `iptables-legacy`, `ip6tables-legacy`,
+  `iptables-nft` and `ip6tables-nft` are available as explicit aliases.
 - `CAP_SYS_NICE` is optional, it only silences the `setpriority()` warning.
 
 

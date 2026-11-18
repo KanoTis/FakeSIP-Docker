@@ -75,7 +75,7 @@ RUN set -eux; \
     ldd /usr/sbin/nft || true
 
 ###############################################################################
-# 3. iptables (musl, nft and legacy variants + the extensions FakeSIP uses)
+# 3. iptables: nft + legacy xtables with an automatic per-family fallback
 ###############################################################################
 FROM toolchain AS iptables
 
@@ -94,9 +94,8 @@ RUN set -eux; \
     cp -a /usr/sbin/xtables-nft-multi /usr/sbin/xtables-legacy-multi "$root/usr/sbin/"; \
     cp -a /xtables-dispatch "$root/usr/sbin/iptables"; \
     cp -a /xtables-dispatch "$root/usr/sbin/ip6tables"; \
-    for name in iptables-save iptables-restore \
-                ip6tables-save ip6tables-restore iptables-nft ip6tables-nft \
-                xtables-monitor; do \
+    for name in iptables-save iptables-restore ip6tables-save ip6tables-restore \
+                iptables-nft ip6tables-nft xtables-monitor; do \
         ln -s xtables-nft-multi "$root/usr/sbin/$name"; \
     done; \
     for name in iptables-legacy ip6tables-legacy iptables-legacy-save \
@@ -111,7 +110,8 @@ RUN set -eux; \
                libxt_mark libxt_connbytes libxt_NFQUEUE libipt_icmp libip6t_icmp6; do \
         cp -a "/usr/lib/xtables/$ext.so" "$root/usr/lib/xtables/"; \
     done; \
-    find "$root" -type f -exec strip --strip-unneeded {} + 2>/dev/null || true
+    find "$root" -type f -exec strip --strip-unneeded {} + 2>/dev/null || true; \
+    ls -l "$root/usr/sbin" "$root/usr/lib"
 
 ###############################################################################
 # 4. fakesip release binary
@@ -153,6 +153,9 @@ COPY --from=iptables /rootfs/ /
 COPY --from=fakesip /fakesip /usr/sbin/fakesip
 
 ENV HOME=/root \
-    PATH=/usr/sbin:/usr/bin:/sbin:/bin
+    PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+    LANG=C.UTF-8 \
+    LANGUAGE=C.UTF-8 \
+    LC_ALL=C.UTF-8
 
 ENTRYPOINT ["/usr/sbin/fakesip"]

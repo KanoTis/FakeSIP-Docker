@@ -4,10 +4,11 @@
  * Small shim installed as /usr/sbin/iptables and /usr/sbin/ip6tables.
  *
  * It prefers the nft-backed xtables binary and transparently falls back to the
- * legacy (ip_tables / ip6_tables) one when nf_tables is unavailable or broken,
- * which is the case on older kernels (e.g. Synology DSM 4.4).
+ * legacy (ip_tables / ip6_tables) one when nf_tables is unavailable or broken
+ * (e.g. Synology DSM 4.4), and vice versa when only legacy is broken.
  *
- * The choice is cached in /run so a single run never mixes both backends.
+ * The chosen backend is cached per command name, so a single run never mixes
+ * both backends for the same address family.
  */
 
 #define _GNU_SOURCE
@@ -19,7 +20,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 
-#define STATE_FILE "/run/xtables.backend"
+#define STATE_DIR "/run"
 #define NFT_MULTI "/usr/sbin/xtables-nft-multi"
 #define LEGACY_MULTI "/usr/sbin/xtables-legacy-multi"
 
@@ -36,12 +37,15 @@ static const char *base_name(const char *path)
     return slash ? slash + 1 : path;
 }
 
-static int read_backend(void)
+static int read_backend(const char *name)
 {
+    char path[128], buf[16];
     FILE *fp;
-    char buf[16];
 
-    fp = fopen(STATE_FILE, "r");
+    if (snprintf(path, sizeof(path), STATE_DIR "/xtables.%s", name) < 0) {
+        return BACKEND_UNKNOWN;
+    }
+    fp = fopen(path, "r");
     if (!fp) {
         return BACKEND_UNKNOWN;
     }
@@ -59,11 +63,15 @@ static int read_backend(void)
     return BACKEND_UNKNOWN;
 }
 
-static void write_backend(int legacy)
+static void write_backend(const char *name, int legacy)
 {
+    char path[128];
     FILE *fp;
 
-    fp = fopen(STATE_FILE, "w");
+    if (snprintf(path, sizeof(path), STATE_DIR "/xtables.%s", name) < 0) {
+        return;
+    }
+    fp = fopen(path, "w");
     if (!fp) {
         return;
     }
@@ -71,9 +79,14 @@ static void write_backend(int legacy)
     fclose(fp);
 }
 
-static void clear_backend(void)
+static void clear_backend(const char *name)
 {
-    unlink(STATE_FILE);
+    char path[128];
+
+    if (snprintf(path, sizeof(path), STATE_DIR "/xtables.%s", name) < 0) {
+        return;
+    }
+    unlink(path);
 }
 
 static int run_multi(const char *exe, char **argv, const char *argv0)
@@ -105,6 +118,8 @@ int main(int argc, char **argv)
     char legacy_name[64];
     int backend, res;
 
+    (void) argc;
+
     if (!argv || !argv[0]) {
         return 1;
     }
@@ -113,7 +128,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    backend = read_backend();
+    backend = read_backend(name);
     if (backend == BACKEND_LEGACY) {
         return run_multi(LEGACY_MULTI, argv, legacy_name);
     }
@@ -123,16 +138,16 @@ int main(int argc, char **argv)
 
     res = run_multi(NFT_MULTI, argv, name);
     if (!res) {
-        write_backend(0);
+        write_backend(name, 0);
         return 0;
     }
 
     res = run_multi(LEGACY_MULTI, argv, legacy_name);
     if (!res) {
-        write_backend(1);
+        write_backend(name, 1);
         return 0;
     }
 
-    clear_backend();
+    clear_backend(name);
     return res;
 }
