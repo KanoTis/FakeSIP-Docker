@@ -4,8 +4,9 @@ Docker container for [FakeSIP](https://github.com/MikeWang000000/FakeSIP).
 
 Disguise your UDP traffic as SIP protocol to evade DPI detection, using Netfilter Queue (NFQUEUE).
 
-The image is built `FROM scratch` and only ships two static binaries
-(`fakesip` + a statically linked `nft`), so it weighs in at ~1 MB.
+The image is built `FROM scratch`. It ships the `fakesip` binary, a statically
+linked `nft`, and `iptables`/`ip6tables` (nft + legacy variants, musl, with the
+xtables extensions FakeSIP needs). Total size: ~2.5 MB.
 
 
 ## Quick Start
@@ -42,10 +43,9 @@ Notes:
 - `--net=host` is required for the firewall rules to apply to host traffic.
 - The container ships a static `nft`; the host kernel must provide
   `nf_tables` and `nfnetlink_queue` support.
-- `iptables` is **not** bundled (that is what keeps the image tiny). The `-z`
-  flag and the automatic iptables fallback therefore do not work inside this
-  container; use `-f` to skip rule setup and manage the rules yourself if your
-  host only has iptables.
+- `-z` (use `iptables` instead of `nft`) works too: `iptables`/`ip6tables` are
+  the nft-backed xtables binaries, and `iptables-legacy`/`ip6tables-legacy` are
+  included for kernels without `nf_tables`.
 - `CAP_SYS_NICE` is optional, it only silences the `setpriority()` warning.
 
 

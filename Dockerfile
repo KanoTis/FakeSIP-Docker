@@ -75,7 +75,37 @@ RUN set -eux; \
     ldd /usr/sbin/nft || true
 
 ###############################################################################
-# 3. fakesip release binary
+# 3. iptables (musl, nft and legacy variants + the extensions FakeSIP uses)
+###############################################################################
+FROM ${ALPINE} AS iptables
+
+RUN apk add --no-cache iptables iptables-legacy
+
+RUN set -eux; \
+    root=/rootfs; \
+    mkdir -p "$root/usr/sbin" "$root/usr/lib/xtables" "$root/lib" "$root/run"; \
+    cp -a /usr/sbin/xtables-nft-multi /usr/sbin/xtables-legacy-multi "$root/usr/sbin/"; \
+    for name in iptables ip6tables iptables-save iptables-restore \
+                ip6tables-save ip6tables-restore iptables-nft ip6tables-nft \
+                xtables-monitor; do \
+        ln -s xtables-nft-multi "$root/usr/sbin/$name"; \
+    done; \
+    for name in iptables-legacy ip6tables-legacy iptables-legacy-save \
+                iptables-legacy-restore ip6tables-legacy-save \
+                ip6tables-legacy-restore; do \
+        ln -s xtables-legacy-multi "$root/usr/sbin/$name"; \
+    done; \
+    cp -a /lib/ld-musl-*.so.1 "$root/lib/"; \
+    cp -a /usr/lib/libxtables.so.* /usr/lib/libip4tc.so.* /usr/lib/libip6tc.so.* \
+          /usr/lib/libmnl.so.* /usr/lib/libnftnl.so.* "$root/usr/lib/"; \
+    for ext in libxt_standard libxt_udp libxt_tcp libxt_conntrack libxt_comment \
+               libxt_mark libxt_connbytes libxt_NFQUEUE libipt_icmp libip6t_icmp6; do \
+        cp -a "/usr/lib/xtables/$ext.so" "$root/usr/lib/xtables/"; \
+    done; \
+    find "$root" -type f -exec strip --strip-unneeded {} + 2>/dev/null || true
+
+###############################################################################
+# 4. fakesip release binary
 ###############################################################################
 FROM ${ALPINE} AS fakesip
 
@@ -105,11 +135,12 @@ RUN set -eux; \
     chmod 755 /fakesip
 
 ###############################################################################
-# 4. Runtime: scratch + static nft + static fakesip
+# 5. Runtime
 ###############################################################################
 FROM scratch
 
 COPY --from=nft /usr/sbin/nft /usr/sbin/nft
+COPY --from=iptables /rootfs/ /
 COPY --from=fakesip /fakesip /usr/sbin/fakesip
 
 ENV HOME=/root \
