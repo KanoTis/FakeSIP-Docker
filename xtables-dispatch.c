@@ -12,8 +12,8 @@
  *    choice is cached per command name in /run.
  *
  * 3. When the kernel provides no connbytes match, the "-m connbytes" rule is
- *    degraded to "-m conntrack --ctstate NEW" and a warning is printed, so the
- *    queue still sees the first packet of every flow instead of failing.
+ *    rewritten: first as a per-flow hashlimit that emulates "first N packets",
+ *    and if even that is missing, as "-m conntrack --ctstate NEW".
  *
  * 4. nft: loads the modules and hands over to the real static nft.
  */
@@ -40,11 +40,12 @@
 #define PROBE_CHAIN "FAKESIP_CBPROBE"
 
 enum { BACKEND_UNKNOWN = 0, BACKEND_NFT = 1, BACKEND_LEGACY = 2 };
+enum { MATCH_CONNBYTES = 0, MATCH_HASHLIMIT = 1, MATCH_CONNTRACK = 2 };
 
 static const char *const modules_iptables[] = {
-    "xt_connbytes", "xt_NFQUEUE", "nfnetlink_queue", "xt_conntrack",
-    "xt_mark",      "nf_conntrack", "nf_defrag_ipv4", "nf_defrag_ipv6",
-    NULL
+    "xt_connbytes", "xt_NFQUEUE",   "nfnetlink_queue", "xt_hashlimit",
+    "xt_conntrack", "xt_mark",      "nf_conntrack",    "nf_defrag_ipv4",
+    "nf_defrag_ipv6", NULL
 };
 
 static const char *const modules_nft[] = {
@@ -109,7 +110,7 @@ static int module_loaded(const char *name)
             continue;
         }
         memcpy(mod, line, (size_t) (p - line));
-        mod[p - line] = '\0';
+        mod[p - line] = 0;
         for (i = 0; mod[i]; i++) {
             if (mod[i] == '-') {
                 mod[i] = '_';
@@ -147,7 +148,7 @@ static int scan_dir(const char *dir, const char *want, int depth)
     DIR *d;
     struct dirent *e;
     char path[512];
-    size_t len;
+    size_t len, wlen;
 
     if (depth > 8) {
         return -1;
@@ -156,6 +157,7 @@ static int scan_dir(const char *dir, const char *want, int depth)
     if (!d) {
         return -1;
     }
+    wlen = strlen(want);
     while ((e = readdir(d))) {
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) {
             continue;
@@ -171,8 +173,7 @@ static int scan_dir(const char *dir, const char *want, int depth)
             }
             continue;
         }
-        if (strncmp(e->d_name, want, strlen(want)) ||
-            strncmp(e->d_name + strlen(want), ".ko", 3)) {
+        if (strncmp(e->d_name, want, wlen) || strncmp(e->d_name + wlen, ".ko", 3)) {
             continue;
         }
         if (!load_module_file(path)) {
@@ -218,7 +219,7 @@ static void load_modules(const char *const *mods)
 /*
  * State files are named "/run/xtables.<name>", where <name> is the command
  * name ("iptables" or "ip6tables"), so both address families are tracked
- * independently.
+ * independently. Match probes use "connbytes" / "hashlimit".
  */
 
 static void state_path(char *out, size_t outlen, const char *name)
@@ -258,67 +259,116 @@ static void write_state(const char *file, const char *value)
     fclose(fp);
 }
 
-/* ------------------------------------------------------ connbytes probe */
+/* ---------------------------------------------------------- match probes */
 
-static int connbytes_supported(const char *exe, const char *argv0)
+static int probe_match(const char *exe, const char *argv0, int kind)
 {
     char *new_cmd[] = {"iptables", "-w", "-t", "mangle", "-N",
                        (char *) PROBE_CHAIN, NULL};
-    char *add_cmd[] = {"iptables", "-w", "-t", "mangle", "-A",
-                       (char *) PROBE_CHAIN, "-p", "udp", "-m", "connbytes",
-                       "--connbytes", "1:1", "--connbytes-mode", "packets",
-                       "--connbytes-dir", "both", "-j", "RETURN", NULL};
     char *del_cmd[] = {"iptables", "-w", "-t", "mangle", "-X",
                        (char *) PROBE_CHAIN, NULL};
+    char *bytes_cmd[] = {"iptables", "-w", "-t", "mangle", "-A",
+                         (char *) PROBE_CHAIN, "-p", "udp", "-m", "connbytes",
+                         "--connbytes", "1:1", "--connbytes-mode", "packets",
+                         "--connbytes-dir", "both", "-j", "RETURN", NULL};
+    char *hash_cmd[] = {"iptables", "-w", "-t", "mangle", "-A",
+                        (char *) PROBE_CHAIN, "-p", "udp", "-m", "hashlimit",
+                        "--hashlimit-upto", "10/hour", "--hashlimit-burst", "5",
+                        "--hashlimit-mode", "srcip,dstip,dstport",
+                        "--hashlimit-name", "fakesipprobe",
+                        "--hashlimit-htable-expire", "60000", "-j", "RETURN",
+                        NULL};
+    const char *state = kind == MATCH_CONNBYTES ? "connbytes" : "hashlimit";
+    char **cmd = kind == MATCH_CONNBYTES ? bytes_cmd : hash_cmd;
     int res;
 
     if (getenv("FAKESIP_NO_CONNBYTES")) {
         return 0;
     }
-
-    if (read_state("connbytes", "ok")) {
+    if (read_state(state, "ok")) {
         return 1;
     }
-    if (read_state("connbytes", "no")) {
+    if (read_state(state, "no")) {
         return 0;
     }
 
     run_multi(exe, new_cmd, argv0);
-    res = run_multi(exe, add_cmd, argv0);
+    res = run_multi(exe, cmd, argv0);
     run_multi(exe, del_cmd, argv0);
 
     if (!res) {
-        write_state("connbytes", "ok");
+        write_state(state, "ok");
         return 1;
     }
-    write_state("connbytes", "no");
+    write_state(state, "no");
     return 0;
 }
 
 /*
- * Replace "-m connbytes --connbytes A:B --connbytes-dir D --connbytes-mode M"
- * with "-m conntrack --ctstate NEW".
+ * Rewrite "-m connbytes --connbytes A:B --connbytes-dir D --connbytes-mode M"
+ * into a per-flow hashlimit approximation of "first B packets" or, as the last
+ * resort, into "-m conntrack --ctstate NEW" (first packet only).
  */
-static char **degrade_connbytes(char **argv)
+static char **rewrite_connbytes(char **argv, int kind)
 {
+    static char burst[16];
     char **out;
     int i, j = 0;
 
-    out = calloc(64, sizeof(*out));
+    burst[0] = 0;
+    for (i = 0; argv[i]; i++) {
+        if (!strcmp(argv[i], "--connbytes") && argv[i + 1]) {
+            const char *colon = strchr(argv[i + 1], ':');
+            const char *val = colon ? colon + 1 : argv[i + 1];
+            long n = strtol(val, NULL, 10);
+
+            if (n < 1) {
+                n = 1;
+            }
+            if (n > 32) {
+                n = 32;
+            }
+            snprintf(burst, sizeof(burst), "%ld", n);
+            break;
+        }
+    }
+    if (!burst[0]) {
+        snprintf(burst, sizeof(burst), "5");
+    }
+
+    out = calloc(96, sizeof(*out));
     if (!out) {
         return argv;
     }
-    for (i = 0; argv[i] && j < 60; i++) {
+    for (i = 0; argv[i] && j < 80; i++) {
         if (!strcmp(argv[i], "-m") && argv[i + 1] &&
             !strcmp(argv[i + 1], "connbytes")) {
             out[j++] = "-m";
-            out[j++] = "conntrack";
+            if (kind == MATCH_HASHLIMIT) {
+                out[j++] = "hashlimit";
+                out[j++] = "--hashlimit-upto";
+                out[j++] = "10/hour";
+                out[j++] = "--hashlimit-burst";
+                out[j++] = burst;
+                out[j++] = "--hashlimit-mode";
+                out[j++] = "srcip,dstip,dstport";
+                out[j++] = "--hashlimit-name";
+                out[j++] = "fakesip";
+                out[j++] = "--hashlimit-htable-expire";
+                out[j++] = "60000";
+            } else {
+                out[j++] = "conntrack";
+            }
             i++;
             continue;
         }
-        if (!strcmp(argv[i], "--connbytes")) {
-            out[j++] = "--ctstate";
-            out[j++] = "NEW";
+        if (!strcmp(argv[i], "--connbytes") && argv[i + 1]) {
+            if (kind == MATCH_HASHLIMIT) {
+                /* already emitted with the match */
+            } else {
+                out[j++] = "--ctstate";
+                out[j++] = "NEW";
+            }
             i++;
             continue;
         }
@@ -329,6 +379,7 @@ static char **degrade_connbytes(char **argv)
         }
         out[j++] = argv[i];
     }
+
     out[j] = NULL;
     return out;
 }
@@ -343,6 +394,18 @@ static int has_connbytes(char **argv)
         }
     }
     return 0;
+}
+
+static int retry_with(char **argv, int kind, const char *exe,
+                      const char *argv0)
+{
+    char **fixed = rewrite_connbytes(argv, kind);
+    int res = run_multi(exe, fixed, argv0);
+
+    if (fixed != argv) {
+        free(fixed);
+    }
+    return res;
 }
 
 /* ------------------------------------------------------------------ main */
@@ -380,6 +443,7 @@ int main(int argc, char **argv)
     } else {
         backend = BACKEND_UNKNOWN;
     }
+
     if (backend == BACKEND_LEGACY) {
         res = run_multi(LEGACY_MULTI, argv, legacy_name);
     } else if (backend == BACKEND_NFT) {
@@ -398,25 +462,28 @@ int main(int argc, char **argv)
         }
     }
 
-    if (res && has_connbytes(argv)) {
-        const char *exe =
-            backend == BACKEND_LEGACY ? LEGACY_MULTI : NFT_MULTI;
-        const char *argv0 =
-            backend == BACKEND_LEGACY ? legacy_name : name;
-
-        if (!connbytes_supported(exe, argv0)) {
-            char **fixed = degrade_connbytes(argv);
-
-            fprintf(stderr,
-                    "fakesip-docker: kernel has no connbytes match, "
-                    "degrading to \"-m conntrack --ctstate NEW\" "
-                    "(first packet of each flow only)\n");
-            res = run_multi(exe, fixed, argv0);
-            if (fixed != argv) {
-                free(fixed);
-            }
-        }
+    if (!res || !has_connbytes(argv)) {
+        return res;
     }
 
-    return res;
+    {
+        const char *exe = backend == BACKEND_LEGACY ? LEGACY_MULTI : NFT_MULTI;
+        const char *argv0 = backend == BACKEND_LEGACY ? legacy_name : name;
+
+        if (probe_match(exe, argv0, MATCH_CONNBYTES)) {
+            return res;
+        }
+        if (probe_match(exe, argv0, MATCH_HASHLIMIT)) {
+            fprintf(stderr,
+                    "fakesip-docker: kernel has no connbytes match, "
+                    "emulating it with a per-flow hashlimit "
+                    "(first N packets of each flow)\n");
+            return retry_with(argv, MATCH_HASHLIMIT, exe, argv0);
+        }
+        fprintf(stderr,
+                "fakesip-docker: kernel has neither connbytes nor hashlimit, "
+                "degrading to \"-m conntrack --ctstate NEW\" "
+                "(first packet of each flow only)\n");
+        return retry_with(argv, MATCH_CONNTRACK, exe, argv0);
+    }
 }

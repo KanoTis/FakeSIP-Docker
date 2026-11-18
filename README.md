@@ -32,11 +32,25 @@ docker run --rm     --net=host     --cap-add NET_ADMIN     --cap-add NET_RAW    
 ```
 
 If `xt_connbytes` is missing from the kernel altogether, the `-m connbytes`
-rule is degraded to `-m conntrack --ctstate NEW` (first packet of each flow
-instead of the first five) and this is logged:
+rule is rewritten automatically, in this order:
+
+1. per-flow `hashlimit` emulation — first N packets of each flow
+   (`-m hashlimit --hashlimit-upto 10/hour --hashlimit-burst N
+   --hashlimit-mode srcip,dstip,dstport`)
+2. `-m conntrack --ctstate NEW` — first packet of each flow only
+
+Both cases are logged, e.g.:
 
 ```
-fakesip-docker: kernel has no connbytes match, degrading to "-m conntrack --ctstate NEW" (first packet of each flow only)
+fakesip-docker: kernel has no connbytes match, emulating it with a per-flow hashlimit (first N packets of each flow)
+fakesip-docker: kernel has neither connbytes nor hashlimit, degrading to "-m conntrack --ctstate NEW" (first packet of each flow only)
+```
+
+Check what the kernel actually provides with:
+
+```sh
+tr ' ' '
+' < /proc/net/ip_tables_matches | grep -E 'connbytes|hashlimit|NFQUEUE'
 ```
 
 Set `FAKESIP_NO_MODPROBE=1` to disable module loading, or
