@@ -56,6 +56,16 @@ tr ' ' '
 Set `FAKESIP_NO_MODPROBE=1` to disable module loading, or
 `FAKESIP_NO_CONNBYTES=1` to force the degraded rule.
 
+If nothing can emulate `connbytes` (no `hashlimit` either, as on some Synology
+kernels) the rule queues the first packet of every UDP flow. Set
+`FAKESIP_QUEUE=all` to queue **every** UDP packet instead — stronger disguise,
+but it doubles the upstream packets and costs CPU on long flows:
+
+```yaml
+    environment:
+      - FAKESIP_QUEUE=all
+```
+
 
 ## Usage
 

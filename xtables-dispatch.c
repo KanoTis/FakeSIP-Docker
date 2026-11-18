@@ -44,7 +44,8 @@
 #define CHAIN_R "FAKESIP_R"
 
 enum { BACKEND_UNKNOWN = 0, BACKEND_NFT = 1, BACKEND_LEGACY = 2 };
-enum { MATCH_CONNBYTES = 0, MATCH_HASHLIMIT = 1, MATCH_CONNTRACK = 2 };
+enum { MATCH_CONNBYTES = 0, MATCH_HASHLIMIT = 1, MATCH_CONNTRACK = 2,
+       MATCH_ALL = 3 };
 
 static const char *const modules_iptables[] = {
     "xt_connbytes", "xt_NFQUEUE",   "nfnetlink_queue", "xt_hashlimit",
@@ -347,6 +348,11 @@ static char **rewrite_connbytes(char **argv, int kind)
     for (i = 0; argv[i] && j < 80; i++) {
         if (!strcmp(argv[i], "-m") && argv[i + 1] &&
             !strcmp(argv[i + 1], "connbytes")) {
+            if (kind == MATCH_ALL) {
+                /* queue every matching packet */
+                i++;
+                continue;
+            }
             out[j++] = "-m";
             if (kind == MATCH_HASHLIMIT) {
                 out[j++] = "hashlimit";
@@ -367,8 +373,9 @@ static char **rewrite_connbytes(char **argv, int kind)
             continue;
         }
         if (!strcmp(argv[i], "--connbytes") && argv[i + 1]) {
-            if (kind == MATCH_HASHLIMIT) {
-                /* already emitted with the match */
+            if (kind == MATCH_HASHLIMIT || kind == MATCH_ALL) {
+                /* hashlimit options are emitted with the match;
+                   MATCH_ALL queues everything */
             } else {
                 out[j++] = "--ctstate";
                 out[j++] = "NEW";
@@ -558,6 +565,12 @@ int main(int argc, char **argv)
                     "emulating it with a per-flow hashlimit "
                     "(first N packets of each flow)\n");
             return retry_with(argv, MATCH_HASHLIMIT, exe, argv0);
+        }
+        if (getenv("FAKESIP_QUEUE") && !strcmp(getenv("FAKESIP_QUEUE"), "all")) {
+            fprintf(stderr,
+                    "fakesip-docker: kernel has neither connbytes nor "
+                    "hashlimit, FAKESIP_QUEUE=all queues every UDP packet\n");
+            return retry_with(argv, MATCH_ALL, exe, argv0);
         }
         fprintf(stderr,
                 "fakesip-docker: kernel has neither connbytes nor hashlimit, "
