@@ -38,6 +38,10 @@
 
 #define STATE_DIR "/run"
 #define PROBE_CHAIN "FAKESIP_CBPROBE"
+#define CHAIN_PREFIX "FAKESIP_"
+#define CHAIN_S "FAKESIP_S"
+#define CHAIN_D "FAKESIP_D"
+#define CHAIN_R "FAKESIP_R"
 
 enum { BACKEND_UNKNOWN = 0, BACKEND_NFT = 1, BACKEND_LEGACY = 2 };
 enum { MATCH_CONNBYTES = 0, MATCH_HASHLIMIT = 1, MATCH_CONNTRACK = 2 };
@@ -408,6 +412,69 @@ static int retry_with(char **argv, int kind, const char *exe,
     return res;
 }
 
+/* ------------------------------------------------- stale rule recovery */
+
+/*
+ * A previous FakeSIP run that died before its cleanup (or a container that was
+ * killed) can leave FAKESIP_S / FAKESIP_D / FAKESIP_R behind. Every aborted
+ * run adds one more "-I PREROUTING -j FAKESIP_S" jump, so the following run
+ * fails with "Chain already exists" and never gets going. Detect the chain
+ * creation command and purge the leftovers once before retrying.
+ */
+
+static int is_chain_create(char **argv)
+{
+    int i;
+
+    for (i = 1; argv[i]; i++) {
+        if (strcmp(argv[i], "-N")) {
+            continue;
+        }
+        if (argv[i + 1] && !strncmp(argv[i + 1], CHAIN_PREFIX, 7)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void purge_stale(const char *exe, const char *argv0)
+{
+    char *del_s[] = {"iptables", "-w", "-t", "mangle", "-D", "PREROUTING",
+                     "-j", (char *) CHAIN_S, NULL};
+    char *del_d[] = {"iptables", "-w", "-t", "mangle", "-D", "POSTROUTING",
+                     "-j", (char *) CHAIN_D, NULL};
+    char *flush_r[] = {"iptables", "-w", "-t", "mangle", "-F",
+                       (char *) CHAIN_R, NULL};
+    char *flush_s[] = {"iptables", "-w", "-t", "mangle", "-F",
+                       (char *) CHAIN_S, NULL};
+    char *flush_d[] = {"iptables", "-w", "-t", "mangle", "-F",
+                       (char *) CHAIN_D, NULL};
+    char *del_r[] = {"iptables", "-w", "-t", "mangle", "-X",
+                     (char *) CHAIN_R, NULL};
+    char *del_cs[] = {"iptables", "-w", "-t", "mangle", "-X",
+                      (char *) CHAIN_S, NULL};
+    char *del_cd[] = {"iptables", "-w", "-t", "mangle", "-X",
+                      (char *) CHAIN_D, NULL};
+    int i;
+
+    for (i = 0; i < 16; i++) {
+        if (run_multi(exe, del_s, argv0)) {
+            break;
+        }
+    }
+    for (i = 0; i < 16; i++) {
+        if (run_multi(exe, del_d, argv0)) {
+            break;
+        }
+    }
+    run_multi(exe, flush_r, argv0);
+    run_multi(exe, flush_s, argv0);
+    run_multi(exe, flush_d, argv0);
+    run_multi(exe, del_r, argv0);
+    run_multi(exe, del_cs, argv0);
+    run_multi(exe, del_cd, argv0);
+}
+
 /* ------------------------------------------------------------------ main */
 
 int main(int argc, char **argv)
@@ -463,7 +530,19 @@ int main(int argc, char **argv)
     }
 
     if (!res || !has_connbytes(argv)) {
-        return res;
+        const char *exe = backend == BACKEND_LEGACY ? LEGACY_MULTI : NFT_MULTI;
+        const char *argv0 = backend == BACKEND_LEGACY ? legacy_name : name;
+
+        if (res && is_chain_create(argv)) {
+            purge_stale(exe, argv0);
+            fprintf(stderr,
+                    "fakesip-docker: purged stale FAKESIP chains left by a "
+                    "previous run\n");
+            res = run_multi(exe, argv, argv0);
+        }
+        if (!res || !has_connbytes(argv)) {
+            return res;
+        }
     }
 
     {
